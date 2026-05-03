@@ -1,0 +1,2129 @@
+openapi: 3.0.3
+
+info:
+  title: LaunchPad — Placement Portal API
+  description: |
+    REST API for the LaunchPad campus placement portal.
+
+    ## Authentication
+    All protected endpoints require a JWT Bearer token obtained from `POST /api/auth/login`.
+    Include it in the `Authorization` header:
+    ```
+    Authorization: Bearer <token>
+    ```
+    Tokens expire after **24 hours**.
+
+    ## Roles
+    - **admin** — Pre-seeded superuser. Manages companies, students, and drives.
+    - **company** — Self-registered. Must be approved by admin before accessing company endpoints.
+    - **student** — Self-registered. Can immediately log in and apply to drives.
+
+    ## Caching
+    Several GET endpoints are cached in Redis for 5 minutes (300 seconds).
+    Write operations (PATCH, PUT, POST, DELETE) immediately invalidate relevant cache keys.
+
+    ## Base URL
+    `http://localhost:5000`
+  version: "2.0.0"
+  contact:
+    name: LaunchPad — IITM MAD2 Project
+
+servers:
+  - url: http://localhost:5000
+    description: Local development server
+
+tags:
+  - name: Auth
+    description: Registration and login endpoints (no auth required)
+  - name: Admin
+    description: Admin-only endpoints for managing companies, students, and drives
+  - name: Company
+    description: Company endpoints (requires approved company JWT)
+  - name: Student
+    description: Student profile and application history endpoints
+  - name: Drives
+    description: Public drive listing (requires any valid JWT)
+  - name: Applications
+    description: Student application submission and history
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Security Scheme
+# ─────────────────────────────────────────────────────────────────────────────
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT token obtained from POST /api/auth/login
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Reusable Schemas
+  # ─────────────────────────────────────────────────────────────────────────
+  schemas:
+
+    # ── User ──────────────────────────────────────────────────────────────
+    User:
+      type: object
+      properties:
+        id:
+          type: integer
+          example: 1
+        email:
+          type: string
+          format: email
+          example: alice@student.com
+        role:
+          type: string
+          enum: [admin, company, student]
+          example: student
+        is_blacklisted:
+          type: boolean
+          example: false
+        created_at:
+          type: string
+          format: date-time
+          example: "2026-02-27T10:00:00+00:00"
+
+    # ── StudentProfile ─────────────────────────────────────────────────────
+    StudentProfile:
+      type: object
+      properties:
+        id:
+          type: integer
+          example: 3
+        user_id:
+          type: integer
+          example: 5
+        email:
+          type: string
+          format: email
+          example: alice@student.com
+        full_name:
+          type: string
+          example: Alice Johnson
+        branch:
+          type: string
+          example: CS
+          description: Academic branch/department (e.g., CS, ECE, ME, IT)
+        cgpa:
+          type: number
+          format: float
+          minimum: 0.0
+          maximum: 10.0
+          example: 8.5
+        year:
+          type: integer
+          enum: [1, 2, 3, 4]
+          example: 3
+        resume_path:
+          type: string
+          nullable: true
+          example: "uploads/resumes/student_3_alice_resume.pdf"
+          description: Relative path to uploaded resume file. Null if no resume uploaded.
+        is_blacklisted:
+          type: boolean
+          example: false
+
+    # ── CompanyProfile ─────────────────────────────────────────────────────
+    CompanyProfile:
+      type: object
+      properties:
+        id:
+          type: integer
+          example: 2
+        user_id:
+          type: integer
+          example: 4
+        email:
+          type: string
+          format: email
+          example: hr@techcorp.com
+        company_name:
+          type: string
+          example: TechCorp Solutions
+        hr_contact_email:
+          type: string
+          format: email
+          nullable: true
+          example: hr@techcorp.com
+        website:
+          type: string
+          nullable: true
+          example: https://techcorp.com
+        description:
+          type: string
+          nullable: true
+          example: A leading software solutions company.
+        approval_status:
+          type: string
+          enum: [pending, approved, rejected]
+          example: approved
+          description: |
+            Company registration approval status.
+            - `pending`: Awaiting admin review
+            - `approved`: Admin approved; company can log in and create drives
+            - `rejected`: Admin rejected; company cannot log in
+            Note: `is_blacklisted` on the User model is the blacklist flag.
+        is_blacklisted:
+          type: boolean
+          example: false
+
+    # ── PlacementDrive ─────────────────────────────────────────────────────
+    PlacementDrive:
+      type: object
+      properties:
+        id:
+          type: integer
+          example: 7
+        company_id:
+          type: integer
+          example: 2
+        company_name:
+          type: string
+          example: TechCorp Solutions
+          description: Included when include_company=True (default)
+        company_website:
+          type: string
+          nullable: true
+          example: https://techcorp.com
+        job_title:
+          type: string
+          example: Software Engineer Intern
+        job_description:
+          type: string
+          nullable: true
+          example: Work on backend systems using Python and Flask.
+        eligible_branches:
+          type: array
+          items:
+            type: string
+          example: ["CS", "ECE", "IT"]
+          description: List of eligible branches. Empty array means no branch restriction.
+        min_cgpa:
+          type: number
+          format: float
+          nullable: true
+          example: 7.5
+          description: Minimum CGPA required. Null means no CGPA restriction.
+        eligible_years:
+          type: array
+          items:
+            type: integer
+          example: [3, 4]
+          description: List of eligible years. Empty array means no year restriction.
+        application_deadline:
+          type: string
+          format: date-time
+          example: "2026-04-30T23:59:59"
+        status:
+          type: string
+          enum: [pending, approved, rejected, closed]
+          example: approved
+          description: |
+            Drive lifecycle status:
+            - `pending`: Awaiting admin approval; not visible to students
+            - `approved`: Visible to eligible students; accepting applications
+            - `rejected`: Admin rejected; not visible to students
+            - `closed`: Company closed the drive; no new applications accepted
+        created_at:
+          type: string
+          format: date-time
+          example: "2026-03-01T08:00:00+00:00"
+        applicant_count:
+          type: integer
+          example: 14
+        is_eligible:
+          type: boolean
+          nullable: true
+          example: true
+          description: |
+            Whether the authenticated student is eligible for this drive.
+            Null for non-student users.
+        eligibility_reason:
+          type: string
+          nullable: true
+          example: null
+          description: |
+            Reason for ineligibility if is_eligible is false. Null if eligible or non-student.
+
+    # ── Application ────────────────────────────────────────────────────────
+    Application:
+      type: object
+      properties:
+        id:
+          type: integer
+          example: 15
+        student_id:
+          type: integer
+          example: 3
+        drive_id:
+          type: integer
+          example: 7
+        status:
+          type: string
+          enum: [applied, shortlisted, selected, rejected]
+          example: shortlisted
+          description: |
+            Application lifecycle status:
+            - `applied`: Student submitted application
+            - `shortlisted`: Company shortlisted for interview
+            - `selected`: Company selected the student
+            - `rejected`: Company rejected the student
+        applied_at:
+          type: string
+          format: date-time
+          example: "2026-03-05T14:30:00+00:00"
+        updated_at:
+          type: string
+          format: date-time
+          nullable: true
+          example: "2026-03-07T09:00:00+00:00"
+        # Fields included when include_drive=True
+        job_title:
+          type: string
+          example: Software Engineer Intern
+        company_name:
+          type: string
+          example: TechCorp Solutions
+        drive_status:
+          type: string
+          enum: [pending, approved, rejected, closed]
+          example: approved
+        # Fields included when include_student=True
+        student_name:
+          type: string
+          example: Alice Johnson
+        student_email:
+          type: string
+          format: email
+          example: alice@student.com
+        student_branch:
+          type: string
+          example: CS
+        student_cgpa:
+          type: number
+          format: float
+          example: 8.5
+
+    # ── Error ──────────────────────────────────────────────────────────────
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+          example: Email already registered
+
+    # ── Message ────────────────────────────────────────────────────────────
+    Message:
+      type: object
+      properties:
+        message:
+          type: string
+          example: Operation completed successfully.
+
+    # ── AdminDashboard ─────────────────────────────────────────────────────
+    AdminDashboard:
+      type: object
+      properties:
+        total_students:
+          type: integer
+          example: 120
+        total_companies:
+          type: integer
+          example: 18
+        total_drives:
+          type: integer
+          example: 45
+
+    # ── CompanyDashboard ───────────────────────────────────────────────────
+    CompanyDashboard:
+      type: object
+      properties:
+        company:
+          $ref: '#/components/schemas/CompanyProfile'
+        drives:
+          type: array
+          items:
+            $ref: '#/components/schemas/PlacementDrive'
+
+    # ── StudentApplicationsWithInfo ────────────────────────────────────────
+    StudentApplicationsWithInfo:
+      type: object
+      properties:
+        student:
+          $ref: '#/components/schemas/StudentProfile'
+        applications:
+          type: array
+          items:
+            $ref: '#/components/schemas/Application'
+
+    # ── TaskQueued ─────────────────────────────────────────────────────────
+    TaskQueued:
+      type: object
+      properties:
+        message:
+          type: string
+          example: Task queued successfully.
+        task_id:
+          type: string
+          example: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Reusable Responses
+  # ─────────────────────────────────────────────────────────────────────────
+  responses:
+    Unauthorized:
+      description: Missing or invalid JWT token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: "Missing Authorization Header"
+
+    Forbidden:
+      description: Authenticated but not authorized (wrong role, blacklisted, or not approved)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: "Admin access required"
+
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: "Not found"
+
+    BadRequest:
+      description: Invalid request data
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: "job_title is required"
+
+    Conflict:
+      description: Resource conflict (e.g., duplicate application or email)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: "You have already applied to this drive"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Paths
+# ─────────────────────────────────────────────────────────────────────────────
+paths:
+
+  # ===========================================================================
+  # AUTH
+  # ===========================================================================
+
+  /api/auth/register/student:
+    post:
+      tags: [Auth]
+      summary: Register a new student
+      description: |
+        Creates a new student user account and student profile in a single request.
+        Students can log in immediately after registration — no admin approval required.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password, full_name, branch, cgpa, year]
+              properties:
+                email:
+                  type: string
+                  format: email
+                  example: alice@student.com
+                password:
+                  type: string
+                  minLength: 6
+                  example: secret123
+                full_name:
+                  type: string
+                  example: Alice Johnson
+                branch:
+                  type: string
+                  example: CS
+                  description: Academic branch (e.g., CS, ECE, ME, IT, Civil)
+                cgpa:
+                  type: number
+                  format: float
+                  minimum: 0.0
+                  maximum: 10.0
+                  example: 8.5
+                year:
+                  type: integer
+                  enum: [1, 2, 3, 4]
+                  example: 3
+      responses:
+        '201':
+          description: Student registered successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Message'
+              example:
+                message: "Student registered successfully."
+        '400':
+          description: Validation error (missing fields, invalid CGPA/year, short password)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                missing_fields:
+                  value: { error: "full_name, branch, cgpa, and year are required" }
+                invalid_cgpa:
+                  value: { error: "CGPA must be between 0.0 and 10.0" }
+                invalid_year:
+                  value: { error: "Year must be 1, 2, 3, or 4" }
+                short_password:
+                  value: { error: "Password must be at least 6 characters" }
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/auth/register/company:
+    post:
+      tags: [Auth]
+      summary: Register a new company
+      description: |
+        Creates a new company user account and company profile.
+        The company is created with `approval_status: pending`.
+        The company **cannot log in** until the admin approves their registration.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password, company_name]
+              properties:
+                email:
+                  type: string
+                  format: email
+                  example: hr@techcorp.com
+                password:
+                  type: string
+                  minLength: 6
+                  example: secret123
+                company_name:
+                  type: string
+                  example: TechCorp Solutions
+                hr_contact_email:
+                  type: string
+                  format: email
+                  nullable: true
+                  example: hr@techcorp.com
+                website:
+                  type: string
+                  nullable: true
+                  example: https://techcorp.com
+                description:
+                  type: string
+                  nullable: true
+                  example: A leading software solutions company.
+      responses:
+        '201':
+          description: Company registered successfully (pending admin approval)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Message'
+              example:
+                message: "Company registered successfully. Pending admin approval."
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/auth/login:
+    post:
+      tags: [Auth]
+      summary: Login and obtain JWT token
+      description: |
+        Authenticates a user and returns a JWT access token valid for 24 hours.
+
+        **Login restrictions:**
+        - Blacklisted users cannot log in (403).
+        - Companies with `approval_status: pending` cannot log in (403).
+        - Companies with `approval_status: rejected` cannot log in (403).
+        - Admin and students can always log in (unless blacklisted).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:
+                  type: string
+                  format: email
+                  example: admin@launchpad.com
+                password:
+                  type: string
+                  example: admin123
+      responses:
+        '200':
+          description: Login successful — returns JWT token and user/profile data
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  access_token:
+                    type: string
+                    example: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+                  user:
+                    $ref: '#/components/schemas/User'
+                  profile:
+                    description: StudentProfile or CompanyProfile depending on role. Null for admin.
+                    nullable: true
+                    oneOf:
+                      - $ref: '#/components/schemas/StudentProfile'
+                      - $ref: '#/components/schemas/CompanyProfile'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: Invalid email or password
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "Invalid email or password"
+        '403':
+          description: Account blacklisted or company not approved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                blacklisted:
+                  value: { error: "Your account has been blacklisted. Contact admin." }
+                pending:
+                  value: { error: "Your company registration is pending admin approval." }
+                rejected:
+                  value: { error: "Your company registration was rejected." }
+
+  /api/auth/me:
+    get:
+      tags: [Auth]
+      summary: Get current authenticated user info
+      description: |
+        Returns the authenticated user's info and their profile (StudentProfile or CompanyProfile).
+        Useful for the frontend to retrieve role and profile data after login.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Current user info and profile
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user:
+                    $ref: '#/components/schemas/User'
+                  profile:
+                    nullable: true
+                    description: StudentProfile or CompanyProfile. Null for admin.
+                    oneOf:
+                      - $ref: '#/components/schemas/StudentProfile'
+                      - $ref: '#/components/schemas/CompanyProfile'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ===========================================================================
+  # ADMIN
+  # ===========================================================================
+
+  /api/admin/dashboard:
+    get:
+      tags: [Admin]
+      summary: Get admin dashboard statistics
+      description: |
+        Returns aggregate counts: total students, total companies, total placement drives.
+        Response is cached in Redis for 5 minutes. Cache is invalidated on any write operation
+        that changes these counts.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Dashboard statistics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminDashboard'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/admin/companies:
+    get:
+      tags: [Admin]
+      summary: List all companies
+      description: |
+        Returns a list of all company profiles. Supports filtering by approval status
+        and searching by company name or email.
+
+        **Filter by status:**
+        - `?status=pending` — companies awaiting admin review
+        - `?status=approved` — approved companies
+        - `?status=rejected` — rejected companies
+        - `?status=blacklisted` — blacklisted companies (filters by `User.is_blacklisted = true`)
+
+        **Search:** `?search=techcorp` — searches company name and email (case-insensitive).
+
+        Results are cached per status+search combination for 5 minutes.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [pending, approved, rejected, blacklisted]
+          description: Filter companies by approval status or blacklist state
+          example: pending
+        - name: search
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Search by company name or email (case-insensitive, partial match)
+          example: techcorp
+      responses:
+        '200':
+          description: List of company profiles
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CompanyProfile'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/admin/companies/{company_id}:
+    get:
+      tags: [Admin]
+      summary: Get a single company by ID
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: company_id
+          in: path
+          required: true
+          schema:
+            type: integer
+          example: 2
+      responses:
+        '200':
+          description: Company profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CompanyProfile'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/admin/companies/{company_id}/approve:
+    patch:
+      tags: [Admin]
+      summary: Approve a company registration
+      description: |
+        Sets `CompanyProfile.approval_status` to `"approved"`.
+        The company can now log in and create placement drives.
+        Invalidates company list and dashboard caches.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: company_id
+          in: path
+          required: true
+          schema:
+            type: integer
+          example: 2
+      responses:
+        '200':
+          description: Company approved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Company approved."
+                  company:
+                    $ref: '#/components/schemas/CompanyProfile'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/admin/companies/{company_id}/reject:
+    patch:
+      tags: [Admin]
+      summary: Reject a company registration
+      description: |
+        Sets `CompanyProfile.approval_status` to `"rejected"`.
+        The company cannot log in.
+        Invalidates company list and dashboard caches.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: company_id
+          in: path
+          required: true
+          schema:
+            type: integer
+          example: 2
+      responses:
+        '200':
+          description: Company rejected
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Company rejected."
+                  company:
+                    $ref: '#/components/schemas/CompanyProfile'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/admin/companies/{company_id}/blacklist:
+    patch:
+      tags: [Admin]
+      summary: Toggle company blacklist status
+      description: |
+        Toggles `User.is_blacklisted` for the company's user account.
+
+        **Blacklisting behavior:**
+        - If the company was `pending`, their `approval_status` is also set to `"rejected"`.
+        - A blacklisted company cannot log in regardless of `approval_status`.
+
+        **Un-blacklisting behavior:**
+        - `is_blacklisted` is set to `false`.
+        - `approval_status` is reset to `"pending"` so the admin can re-review.
+
+        Invalidates company list and dashboard caches.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: company_id
+          in: path
+          required: true
+          schema:
+            type: integer
+          example: 2
+      responses:
+        '200':
+          description: Blacklist status toggled
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Company blacklisted."
+                  is_blacklisted:
+                    type: boolean
+                    example: true
+                  approval_status:
+                    type: string
+                    example: "rejected"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/admin/students:
+    get:
+      tags: [Admin]
+      summary: List all students
+      description: |
+        Returns a list of all student profiles.
+        Supports searching by full name, email, or branch (case-insensitive, partial match).
+        Results are cached per search query for 5 minutes.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: search
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Search by full name, email, or branch
+          example: alice
+      responses:
+        '200':
+          description: List of student profiles
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/StudentProfile'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/admin/students/{student_id}:
+    get:
+      tags: [Admin]
+      summary: Get a single student by ID
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: student_id
+          in: path
+          required: true
+          schema:
+            type: integer
+          example: 3
+      responses:
+        '200':
+          description: Student profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StudentProfile'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/admin/students/{student_id}/blacklist:
+    patch:
+      tags: [Admin]
+      summary: Toggle student blacklist status
+      description: |
+        Toggles `User.is_blacklisted` for the student's user account.
+        A blacklisted student cannot log in.
+        Invalidates student list and dashboard caches.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: student_id
+          in: path
+          required: true
+          schema:
+            type: integer
+          example: 3
+      responses:
+        '200':
+          description: Blacklist status toggled
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Student blacklisted."
+                  is_blacklisted:
+                    type: boolean
+                    example: true
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/admin/students/{student_id}/applications:
+    get:
+      tags: [Admin]
+      summary: Get a student's full application history
+      description: |
+        Returns the student's profile info along with all their applications,
+        ordered by most recent first. Each application includes drive and company info.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: student_id
+          in: path
+          required: true
+          schema:
+            type: integer
+          example: 3
+      responses:
+        '200':
+          description: Student info and application history
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StudentApplicationsWithInfo'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/admin/drives:
+    get:
+      tags: [Admin]
+      summary: List all placement drives
+      description: |
+        Returns all placement drives across all companies.
+        Optionally filter by status. Results are cached per status for 5 minutes.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [pending, approved, rejected, closed]
+          description: Filter drives by status
+          example: pending
+      responses:
+        '200':
+          description: List of placement drives (ordered by created_at descending)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PlacementDrive'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/admin/drives/{drive_id}/approve:
+    patch:
+      tags: [Admin]
+      summary: Approve a placement drive
+      description: |
+        Sets `PlacementDrive.status` to `"approved"`.
+        The drive becomes visible to eligible students on their dashboard.
+        Invalidates drive list and public drives caches.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: drive_id
+          in: path
+          required: true
+          schema:
+            type: integer
+          example: 7
+      responses:
+        '200':
+          description: Drive approved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Drive approved."
+                  drive:
+                    $ref: '#/components/schemas/PlacementDrive'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/admin/drives/{drive_id}/reject:
+    patch:
+      tags: [Admin]
+      summary: Reject a placement drive
+      description: |
+        Sets `PlacementDrive.status` to `"rejected"`.
+        The drive is hidden from students.
+        Invalidates drive list and public drives caches.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: drive_id
+          in: path
+          required: true
+          schema:
+            type: integer
+          example: 7
+      responses:
+        '200':
+          description: Drive rejected
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Drive rejected."
+                  drive:
+                    $ref: '#/components/schemas/PlacementDrive'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/admin/applications:
+    get:
+      tags: [Admin]
+      summary: List all applications across all students
+      description: |
+        Returns every application in the system, ordered by most recent first.
+        Each application includes student info (name, email, branch, CGPA) and drive info
+        (job title, company name, drive status).
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: All applications with student and drive info
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Application'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/admin/trigger/daily-reminders:
+    post:
+      tags: [Admin]
+      summary: Manually trigger the daily reminder Celery task
+      description: |
+        Immediately queues the `send_daily_reminders` Celery task for demo/testing purposes.
+        The task sends deadline reminder emails to eligible students for drives expiring within 3 days.
+        Returns 202 Accepted with the Celery task ID.
+      security:
+        - BearerAuth: []
+      responses:
+        '202':
+          description: Task queued successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskQueued'
+              example:
+                message: "Daily reminder task queued."
+                task_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/admin/trigger/monthly-report:
+    post:
+      tags: [Admin]
+      summary: Manually trigger the monthly report Celery task
+      description: |
+        Immediately queues the `send_monthly_report` Celery task for demo/testing purposes.
+        The task generates an HTML activity report for the previous calendar month
+        and emails it to the admin.
+        Returns 202 Accepted with the Celery task ID.
+      security:
+        - BearerAuth: []
+      responses:
+        '202':
+          description: Task queued successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskQueued'
+              example:
+                message: "Monthly report task queued."
+                task_id: "b2c3d4e5-f6a7-8901-bcde-f12345678901"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  # ===========================================================================
+  # COMPANY
+  # ===========================================================================
+
+  /api/company/dashboard:
+    get:
+      tags: [Company]
+      summary: Get company dashboard
+      description: |
+        Returns the company's profile and all their placement drives with applicant counts.
+        Requires an approved company JWT — pending/rejected/blacklisted companies get 403.
+        Response is cached per company for 5 minutes.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Company dashboard data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CompanyDashboard'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Not a company, blacklisted, or not yet approved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                not_company:
+                  value: { error: "Company access required" }
+                blacklisted:
+                  value: { error: "Your account is blacklisted" }
+                not_approved:
+                  value: { error: "Your company is not approved yet" }
+
+  /api/company/profile:
+    get:
+      tags: [Company]
+      summary: Get company profile
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Company profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CompanyProfile'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+    put:
+      tags: [Company]
+      summary: Update company profile
+      description: |
+        Updates one or more fields of the company profile.
+        All fields are optional — only provided fields are updated.
+        Invalidates the company dashboard cache.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                company_name:
+                  type: string
+                  example: TechCorp Solutions Ltd.
+                hr_contact_email:
+                  type: string
+                  format: email
+                  nullable: true
+                  example: newhR@techcorp.com
+                website:
+                  type: string
+                  nullable: true
+                  example: https://techcorp.com
+                description:
+                  type: string
+                  nullable: true
+                  example: Updated company description.
+      responses:
+        '200':
+          description: Profile updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Profile updated."
+                  company:
+                    $ref: '#/components/schemas/CompanyProfile'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/company/drives:
+    get:
+      tags: [Company]
+      summary: List company's placement drives
+      description: |
+        Returns all placement drives created by the authenticated company,
+        ordered by most recent first. Cached per company for 5 minutes.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: List of company's drives
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PlacementDrive'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+    post:
+      tags: [Company]
+      summary: Create a new placement drive
+      description: |
+        Creates a new placement drive for the authenticated company.
+        The drive is created with `status: pending` and must be approved by the admin
+        before students can see or apply to it.
+
+        **Eligibility fields:**
+        - `eligible_branches`: Array of branch strings. Empty array or omit = no branch restriction.
+        - `eligible_years`: Array of year integers (1–4). Empty array or omit = no year restriction.
+        - `min_cgpa`: Float. Omit or null = no CGPA restriction.
+
+        Invalidates company drives, company dashboard, and admin drives caches.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [job_title, application_deadline]
+              properties:
+                job_title:
+                  type: string
+                  example: Software Engineer Intern
+                job_description:
+                  type: string
+                  nullable: true
+                  example: Work on backend systems using Python and Flask.
+                eligible_branches:
+                  type: array
+                  items:
+                    type: string
+                  nullable: true
+                  example: ["CS", "ECE", "IT"]
+                  description: Leave empty or omit for no branch restriction
+                min_cgpa:
+                  type: number
+                  format: float
+                  nullable: true
+                  example: 7.5
+                  description: Minimum CGPA required. Omit or null for no restriction.
+                eligible_years:
+                  type: array
+                  items:
+                    type: integer
+                  nullable: true
+                  example: [3, 4]
+                  description: Leave empty or omit for no year restriction
+                application_deadline:
+                  type: string
+                  format: date-time
+                  example: "2026-04-30T23:59:59"
+                  description: ISO 8601 datetime string
+      responses:
+        '201':
+          description: Drive created (pending admin approval)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Drive created. Pending admin approval."
+                  drive:
+                    $ref: '#/components/schemas/PlacementDrive'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/company/drives/{drive_id}:
+    get:
+      tags: [Company]
+      summary: Get a single company drive by ID
+      description: Only returns drives belonging to the authenticated company.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: drive_id
+          in: path
+          required: true
+          schema:
+            type: integer
+          example: 7
+      responses:
+        '200':
+          description: Drive details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlacementDrive'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    put:
+      tags: [Company]
+      summary: Edit a pending placement drive
+      description: |
+        Updates one or more fields of a placement drive.
+        **Only drives with `status: pending` can be edited.**
+        Once a drive is approved or rejected by the admin, it cannot be modified.
+        All fields are optional — only provided fields are updated.
+        Invalidates company drives and dashboard caches.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: drive_id
+          in: path
+          required: true
+          schema:
+            type: integer
+          example: 7
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                job_title:
+                  type: string
+                  example: Senior Software Engineer Intern
+                job_description:
+                  type: string
+                  nullable: true
+                  example: Updated job description.
+                application_deadline:
+                  type: string
+                  format: date-time
+                  example: "2026-05-15T23:59:59"
+                eligible_branches:
+                  type: array
+                  items:
+                    type: string
+                  nullable: true
+                  example: ["CS", "IT"]
+                eligible_years:
+                  type: array
+                  items:
+                    type: integer
+                  nullable: true
+                  example: [3, 4]
+                min_cgpa:
+                  type: number
+                  format: float
+                  nullable: true
+                  example: 8.0
+      responses:
+        '200':
+          description: Drive updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Drive updated."
+                  drive:
+                    $ref: '#/components/schemas/PlacementDrive'
+        '400':
+          description: Validation error or drive is not in pending status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                not_pending:
+                  value: { error: "Only pending drives can be edited" }
+                invalid_deadline:
+                  value: { error: "application_deadline must be ISO format" }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/company/drives/{drive_id}/close:
+    patch:
+      tags: [Company]
+      summary: Close an approved placement drive
+      description: |
+        Sets `PlacementDrive.status` to `"closed"`.
+        **Only approved drives can be closed.**
+        Once closed, no new applications are accepted.
+        Invalidates company drives, dashboard, admin drives, and public drives caches.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: drive_id
+          in: path
+          required: true
+          schema:
+            type: integer
+          example: 7
+      responses:
+        '200':
+          description: Drive closed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Drive closed."
+                  drive:
+                    $ref: '#/components/schemas/PlacementDrive'
+        '400':
+          description: Drive is not in approved status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "Only approved drives can be closed"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/company/drives/{drive_id}/applications:
+    get:
+      tags: [Company]
+      summary: List all applications for a drive
+      description: |
+        Returns all student applications for the specified drive.
+        Only returns applications for drives belonging to the authenticated company.
+        Each application includes student info (name, email, branch, CGPA).
+        Cached per drive for 5 minutes.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: drive_id
+          in: path
+          required: true
+          schema:
+            type: integer
+          example: 7
+      responses:
+        '200':
+          description: List of applications with student info
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Application'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/company/applications/{app_id}/status:
+    patch:
+      tags: [Company]
+      summary: Update an application's status
+      description: |
+        Updates the status of a student's application for one of the company's drives.
+
+        **Allowed status values:** `shortlisted`, `selected`, `rejected`
+        (Cannot set back to `applied` — status progression is forward-only.)
+
+        Invalidates the drive's applications cache.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: app_id
+          in: path
+          required: true
+          schema:
+            type: integer
+          example: 15
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [shortlisted, selected, rejected]
+                  example: shortlisted
+      responses:
+        '200':
+          description: Application status updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Application status updated to 'shortlisted'."
+                  application:
+                    $ref: '#/components/schemas/Application'
+        '400':
+          description: Invalid status value
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "Status must be one of: shortlisted, selected, rejected"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Application not found or does not belong to this company's drives
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "Application not found for your drives"
+
+  # ===========================================================================
+  # STUDENT
+  # ===========================================================================
+
+  /api/student/profile:
+    get:
+      tags: [Student]
+      summary: Get student profile
+      description: Returns the authenticated student's profile.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Student profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StudentProfile'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    put:
+      tags: [Student]
+      summary: Update student profile
+      description: |
+        Updates one or more fields of the student's profile.
+        All fields are optional — only provided fields are updated.
+        Note: Changing branch, CGPA, or year may affect eligibility for drives.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                full_name:
+                  type: string
+                  example: Alice M. Johnson
+                branch:
+                  type: string
+                  example: CS
+                cgpa:
+                  type: number
+                  format: float
+                  minimum: 0.0
+                  maximum: 10.0
+                  example: 8.7
+                year:
+                  type: integer
+                  enum: [1, 2, 3, 4]
+                  example: 4
+      responses:
+        '200':
+          description: Profile updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Profile updated."
+                  profile:
+                    $ref: '#/components/schemas/StudentProfile'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/student/profile/resume:
+    post:
+      tags: [Student]
+      summary: Upload student resume
+      description: |
+        Uploads a resume file for the authenticated student.
+        The file is stored on the server at `backend/src/static/uploads/resumes/`
+        with the filename `student_{id}_{original_filename}`.
+
+        **Allowed file types:** PDF, DOC, DOCX
+        **Maximum file size:** 5 MB
+
+        The `resume_path` field in the student profile is updated to the relative path.
+        If a resume already exists, it is overwritten.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [resume]
+              properties:
+                resume:
+                  type: string
+                  format: binary
+                  description: Resume file (PDF, DOC, or DOCX, max 5 MB)
+      responses:
+        '200':
+          description: Resume uploaded successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Resume uploaded."
+                  resume_path:
+                    type: string
+                    example: "uploads/resumes/student_3_alice_resume.pdf"
+        '400':
+          description: No file provided, no file selected, or invalid file type
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                no_file:
+                  value: { error: "No file provided. Use key 'resume'" }
+                invalid_type:
+                  value: { error: "Only PDF, DOC, and DOCX files are allowed" }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+    delete:
+      tags: [Student]
+      summary: Delete student resume
+      description: |
+        Deletes the student's uploaded resume file from disk and clears `resume_path` in the database.
+        Returns 404 if no resume is currently uploaded.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Resume deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Message'
+              example:
+                message: "Resume deleted."
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: No resume to delete
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "No resume to delete"
+
+  /api/student/applications:
+    get:
+      tags: [Student]
+      summary: Get student's application history
+      description: |
+        Returns all applications submitted by the authenticated student,
+        ordered by most recent first. Each application includes drive info
+        (job title, company name, drive status).
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Student's application history
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Application'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  # ===========================================================================
+  # DRIVES (Public — any authenticated user)
+  # ===========================================================================
+
+  /api/drives:
+    get:
+      tags: [Drives]
+      summary: List all approved placement drives
+      description: |
+        Returns all placement drives with `status: approved`.
+
+        **For student users:** Each drive includes `is_eligible` (bool) and
+        `eligibility_reason` (string, null if eligible) based on the student's
+        current branch, CGPA, and year.
+
+        **For non-student users:** `is_eligible` and `eligibility_reason` are null.
+
+        **Filtering (server-side, applied after eligibility annotation):**
+        - `?search=` — searches job title, job description, and company name
+        - `?branch=CS` — only drives that include CS in eligible_branches
+        - `?year=3` — only drives that include year 3 in eligible_years
+        - `?min_cgpa=7.5` — only drives with min_cgpa ≤ 7.5
+
+        Results are cached per user + filter combination for 5 minutes.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: search
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Search job title, description, or company name (case-insensitive)
+          example: software
+        - name: branch
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Filter to drives that include this branch
+          example: CS
+        - name: year
+          in: query
+          required: false
+          schema:
+            type: integer
+          description: Filter to drives that include this year
+          example: 3
+        - name: min_cgpa
+          in: query
+          required: false
+          schema:
+            type: number
+            format: float
+          description: Filter to drives with min_cgpa at or below this value
+          example: 7.5
+      responses:
+        '200':
+          description: List of approved drives with eligibility info
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PlacementDrive'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/drives/{drive_id}:
+    get:
+      tags: [Drives]
+      summary: Get a single drive by ID
+      description: |
+        Returns details for a specific placement drive.
+
+        **For student users:** Only returns drives with `status: approved`.
+        Includes `is_eligible` and `eligibility_reason`.
+
+        **For admin/company users:** Returns the drive regardless of status.
+
+        Cached per drive + user for 5 minutes.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: drive_id
+          in: path
+          required: true
+          schema:
+            type: integer
+          example: 7
+      responses:
+        '200':
+          description: Drive details with eligibility info
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlacementDrive'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Drive not found (or not approved, for student users)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "Drive not found"
+
+  # ===========================================================================
+  # APPLICATIONS
+  # ===========================================================================
+
+  /api/applications:
+    post:
+      tags: [Applications]
+      summary: Apply to a placement drive
+      description: |
+        Submits an application for the authenticated student to the specified drive.
+
+        **Server-side validation (in order):**
+        1. Drive must exist.
+        2. Drive must have `status: approved`.
+        3. Current UTC time must be before `application_deadline`.
+        4. Student's branch must be in `eligible_branches` (if set).
+        5. Student's CGPA must be ≥ `min_cgpa` (if set).
+        6. Student's year must be in `eligible_years` (if set).
+        7. Student must not have already applied to this drive (409 Conflict).
+
+        On success, creates an Application with `status: applied`.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [drive_id]
+              properties:
+                drive_id:
+                  type: integer
+                  example: 7
+                  description: ID of the placement drive to apply to
+      responses:
+        '201':
+          description: Application submitted successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Application submitted successfully."
+                  application:
+                    $ref: '#/components/schemas/Application'
+        '400':
+          description: Drive not open, deadline passed, or missing drive_id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                not_open:
+                  value: { error: "This drive is not open for applications" }
+                deadline_passed:
+                  value: { error: "Application deadline has passed" }
+                missing_drive_id:
+                  value: { error: "drive_id is required" }
+        '403':
+          description: Student not eligible for this drive
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                branch_ineligible:
+                  value: { error: "Your branch (ME) is not eligible for this drive." }
+                cgpa_ineligible:
+                  value: { error: "Minimum CGPA required is 7.5. Your CGPA is 6.8." }
+                year_ineligible:
+                  value: { error: "Your year (2) is not eligible for this drive." }
+        '404':
+          description: Drive not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "Drive not found"
+        '409':
+          description: Student has already applied to this drive
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "You have already applied to this drive"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/applications/{app_id}:
+    get:
+      tags: [Applications]
+      summary: Get a single application by ID
+      description: |
+        Returns details for a specific application.
+
+        **Access control:**
+        - Students can only view their own applications (403 if not theirs).
+        - Admin can view any application.
+        - Company access is not restricted by this endpoint (use `/api/company/drives/<id>/applications` instead).
+
+        Includes both student info and drive info.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: app_id
+          in: path
+          required: true
+          schema:
+            type: integer
+          example: 15
+      responses:
+        '200':
+          description: Application details with student and drive info
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Application'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Student trying to access another student's application
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "Access denied"
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/applications/export:
+    post:
+      tags: [Applications]
+      summary: Trigger async CSV export of placement history
+      description: |
+        Queues a Celery task (`export_applications_csv`) to generate a CSV of the
+        authenticated student's complete application history and email it to them.
+
+        **Returns immediately** with HTTP 202 and a `task_id`. The CSV is generated
+        asynchronously and emailed to the student's registered email address via MailHog.
+
+        **CSV columns:**
+        - Student ID
+        - Student Name
+        - Company Name
+        - Job Title
+        - Drive Status
+        - Application Status
+        - Applied Date
+        - Last Updated
+
+        **Filename format:** `placement_history_{student_id}_{YYYYMMDD}.csv`
+
+        Requires MailHog and Celery worker to be running.
+      security:
+        - BearerAuth: []
+      responses:
+        '202':
+          description: Export task queued — CSV will be emailed to the student
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskQueued'
+              example:
+                message: "Your placement history export has been queued. You will receive an email shortly."
+                task_id: "c3d4e5f6-a7b8-9012-cdef-123456789012"
+        '400':
+          description: Student email not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: "Student email not found"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'

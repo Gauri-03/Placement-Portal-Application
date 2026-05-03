@@ -1,0 +1,9 @@
+instructions.md
+src/__pycache__/
+src/apis/__pycache__/
+src/workers/__pycache__/
+instance/
+tests/__pycache__/
+tests/scripts/__pycache__/
+.venv/
+.wslvenv/

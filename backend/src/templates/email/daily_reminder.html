@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Application Deadline Reminder</title>
+  <style>
+    body { font-family: Arial, sans-serif; background-color: #f4f6f9; margin: 0; padding: 0; }
+    .container { max-width: 600px; margin: 30px auto; background: #ffffff; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+    .header { background-color: #0d6efd; color: #ffffff; padding: 24px 32px; }
+    .header h1 { margin: 0; font-size: 22px; }
+    .header p { margin: 6px 0 0; font-size: 14px; opacity: 0.85; }
+    .body { padding: 28px 32px; color: #333333; }
+    .body p { line-height: 1.6; margin: 0 0 16px; }
+    .drive-card { background: #f0f4ff; border-left: 4px solid #0d6efd; border-radius: 4px; padding: 16px 20px; margin: 20px 0; }
+    .drive-card h2 { margin: 0 0 8px; font-size: 18px; color: #0d6efd; }
+    .drive-card p { margin: 4px 0; font-size: 14px; color: #555; }
+    .badge { display: inline-block; background: #dc3545; color: #fff; border-radius: 12px; padding: 3px 12px; font-size: 13px; font-weight: bold; }
+    .badge.warning { background: #fd7e14; }
+    .cta { text-align: center; margin: 24px 0; }
+    .cta a { background-color: #0d6efd; color: #ffffff; text-decoration: none; padding: 12px 28px; border-radius: 6px; font-size: 15px; font-weight: bold; }
+    .footer { background: #f8f9fa; padding: 16px 32px; text-align: center; font-size: 12px; color: #888; border-top: 1px solid #e9ecef; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>⏰ Application Deadline Reminder</h1>
+      <p>LaunchPad — Institute Placement Portal</p>
+    </div>
+    <div class="body">
+      <p>Hi <strong>{{ student_name }}</strong>,</p>
+      <p>
+        This is a friendly reminder that the application deadline for the following placement drive
+        is approaching. Don't miss your chance!
+      </p>
+
+      <div class="drive-card">
+        <h2>{{ job_title }}</h2>
+        <p><strong>Company:</strong> {{ company_name }}</p>
+        <p><strong>Deadline:</strong> {{ deadline }}</p>
+        <p>
+          <strong>Time Left:</strong>
+          {% if days_left <= 1 %}
+            <span class="badge">Last day!</span>
+          {% else %}
+            <span class="badge warning">{{ days_left }} day(s) left</span>
+          {% endif %}
+        </p>
+        {% if eligible_branches %}
+        <p><strong>Eligible Branches:</strong> {{ eligible_branches | join(", ") }}</p>
+        {% endif %}
+        {% if min_cgpa %}
+        <p><strong>Minimum CGPA:</strong> {{ min_cgpa }}</p>
+        {% endif %}
+      </div>
+
+      <p>
+        You are eligible for this drive. Log in to LaunchPad now to submit your application
+        before the deadline closes.
+      </p>
+
+      <div class="cta">
+        <a href="http://localhost:8080/#/student/dashboard">Apply Now →</a>
+      </div>
+
+      <p style="font-size: 13px; color: #888;">
+        If you've already applied or are not interested, you can ignore this email.
+      </p>
+    </div>
+    <div class="footer">
+      © LaunchPad — Institute Placement Portal &nbsp;|&nbsp; This is an automated reminder.
+    </div>
+  </div>
+</body>
+</html>
